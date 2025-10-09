@@ -55,7 +55,6 @@ class MyPlugin(Star):
             context: 插件上下文
         """
         super().__init__(context)
-        logger.info("MyPlugin 初始化完成")
 
     @filter.command("mchelp")
     async def get_help(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -81,19 +80,14 @@ class MyPlugin(Star):
         Returns:
             包含服务器信息图片的消息结果，如果出错则返回None
         """
-        logger.info("开始执行 mc 命令")
         try:
             group_id = event.get_group_id()
-            logger.info(f"获取到群组ID: {group_id}")
             
             json_path = await self.get_json_path(group_id)
-            logger.info(f"JSON文件路径: {json_path}")
-            
+
             json_data = await read_json(json_path)
-            logger.info(f"读取到的JSON数据: {json_data}")
-            
+
             if not json_data or not json_data.get("servers"):
-                logger.warning("JSON数据为空或没有服务器")
                 yield event.plain_result("请先使用 /mcadd 添加服务器")
                 return
             
@@ -117,26 +111,19 @@ class MyPlugin(Star):
             
             for server_id, server_info in servers.items():
                 try:
-                    logger.info(f"正在处理服务器: {server_info['name']} (ID: {server_id}), 信息: {server_info}")
                     mcinfo_img = await self.get_img(server_info['name'], server_info['host'], server_id, str(json_path))
                     if mcinfo_img:
                         message_chain.append(Comp.Image.fromBase64(mcinfo_img))
-                        logger.info(f"成功添加图片到消息链，服务器名称: {server_info['name']} (ID: {server_id})")
                     else:
-                        logger.warning(f"获取服务器 {server_info['name']} (ID: {server_id}) 的图片失败")
                 except Exception as e:
-                    logger.error(f"处理服务器 {server_info['name']} (ID: {server_id}) 时出错: {e}")
                     continue
 
             if message_chain:
-                logger.info(f"成功生成消息链，包含 {len(message_chain)} 张图片")
                 yield event.chain_result(message_chain)
             else:
-                logger.warning("没有可用的服务器信息")
                 yield event.plain_result("没有可用的服务器信息，请检查服务器是否在线")
                 
         except Exception as e:
-            logger.error(f"执行 mc 命令时出错: {e}")
             yield event.plain_result("查询服务器信息时发生错误")
 
     @filter.command("mcadd")
@@ -153,8 +140,7 @@ class MyPlugin(Star):
         Returns:
             操作结果消息
         """
-        logger.info(f"开始执行 mcadd 命令: {name} -> {host}, force: {force}")
-        
+
         try:
             # 检查host合法性
             if not re.match(r'^[a-zA-Z0-9.:-]+$', host):
@@ -177,7 +163,6 @@ class MyPlugin(Star):
                             yield event.plain_result(f"已存在相同地址的服务器 {server_info['name']} (ID: {server_id})")
                             return
             except Exception as e:
-                logger.error(f"检查服务器地址时出错: {e}")
                 yield event.plain_result("检查服务器地址时发生错误")
                 return
                 
@@ -194,7 +179,6 @@ class MyPlugin(Star):
                 yield event.plain_result(f"无法添加 {name}，请检查是否已存在")
                 
         except Exception as e:
-            logger.error(f"执行 mcadd 命令时出错: {e}")
             yield event.plain_result("添加服务器时发生错误")
 
     @filter.command("mcdel")
@@ -209,7 +193,6 @@ class MyPlugin(Star):
         Returns:
             操作结果消息
         """
-        logger.info(f"开始执行 mcdel 命令: {identifier}")
         try:
             group_id = event.get_group_id()
             json_path = await self.get_json_path(group_id)
@@ -220,7 +203,6 @@ class MyPlugin(Star):
                 yield event.plain_result(f"无法删除 {identifier}，请检查是否存在")
                 
         except Exception as e:
-            logger.error(f"执行 mcdel 命令时出错: {e}")
             yield event.plain_result("删除服务器时发生错误")
 
     @filter.command("mcget")
@@ -228,7 +210,6 @@ class MyPlugin(Star):
         """
         获取指定服务器的信息（支持通过名称或ID查找）
         """
-        logger.info(f"开始执行 mcget 命令: {identifier}")
         try:
             group_id = event.get_group_id()
             json_path = await self.get_json_path(group_id)
@@ -242,7 +223,6 @@ class MyPlugin(Star):
             yield event.plain_result(f"{server_info['host']}")
             
         except Exception as e:
-            logger.error(f"执行 mcget 命令时出错: {e}")
             yield event.plain_result("获取服务器信息时发生错误")
 
     @filter.command("mcup")
@@ -259,8 +239,7 @@ class MyPlugin(Star):
         Returns:
             操作结果消息
         """
-        logger.info(f"开始执行 mcup 命令: {identifier}, new_name: {new_name}, new_host: {new_host}")
-        
+
         try:
             if not new_name and not new_host:
                 yield event.plain_result("请提供要更新的信息（新名称或新地址）")
@@ -285,7 +264,6 @@ class MyPlugin(Star):
                 yield event.plain_result(f"无法更新 {identifier}，请检查是否存在或名称是否冲突")
                 
         except Exception as e:
-            logger.error(f"执行 mcup 命令时出错: {e}")
             yield event.plain_result("更新服务器信息时发生错误")
 
     @filter.command("mclist")
@@ -293,7 +271,6 @@ class MyPlugin(Star):
         """
         列出所有服务器及其ID
         """
-        logger.info("开始执行 mclist 命令")
         try:
             group_id = event.get_group_id()
             json_path = await self.get_json_path(group_id)
@@ -310,7 +287,6 @@ class MyPlugin(Star):
             yield event.plain_result(server_list.strip())
             
         except Exception as e:
-            logger.error(f"执行 mclist 命令时出错: {e}")
             yield event.plain_result("获取服务器列表时发生错误")
 
     @filter.command("mccleanup")
@@ -318,7 +294,6 @@ class MyPlugin(Star):
         """
         手动触发自动清理（删除10天未查询成功的服务器）
         """
-        logger.info("开始执行 mccleanup 命令")
         try:
             group_id = event.get_group_id()
             json_path = await self.get_json_path(group_id)
@@ -334,7 +309,6 @@ class MyPlugin(Star):
                 yield event.plain_result("没有需要清理的服务器")
                 
         except Exception as e:
-            logger.error(f"执行 mccleanup 命令时出错: {e}")
             yield event.plain_result("自动清理时发生错误")
 
     async def get_img(self, server_name: str, host: str, server_id: Optional[str] = None, json_path: Optional[str] = None) -> Optional[str]:
@@ -350,11 +324,9 @@ class MyPlugin(Star):
         Returns:
             图片的base64编码字符串，如果获取失败则返回None
         """
-        logger.info(f"开始获取服务器 {server_name} 的图片，主机地址: {host}")
         try:
             info = await get_server_status(host)
             if not info:
-                logger.error(f"无法获取服务器 {server_name} 的状态信息")
                 # 更新查询失败状态
                 if json_path and server_id:
                     await update_server_status(json_path, server_id, False)
@@ -377,11 +349,9 @@ class MyPlugin(Star):
                 server_version=info['server_version'],
                 icon_base64=info['icon_base64']
             )
-            logger.info(f"成功生成服务器 {server_name} 的图片")
             return mcinfo_img
             
         except Exception as e:
-            logger.error(f"获取服务器 {server_name} 的图片时出错: {e}")
             # 更新查询失败状态
             if json_path and server_id:
                 await update_server_status(json_path, server_id, False)
@@ -400,5 +370,4 @@ class MyPlugin(Star):
         data_path = StarTools.get_data_dir("astrbot_mcgetter")
         json_path = data_path / f'{group_id}.json'
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info(f"群号 {group_id} 的 JSON 文件路径: {json_path}")
         return json_path
