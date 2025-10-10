@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from .script.get_server_info import get_server_status
-from .script.template_selector import write_config
+from .script.template_selector import write_config, get_img
 from .script.json_operate import (
     read_json, add_data, del_data, update_data, 
     get_all_servers, get_server_info, get_server_by_name,
