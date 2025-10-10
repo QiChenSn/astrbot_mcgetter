@@ -1,5 +1,5 @@
 name: astrbot_mcgetter # 这是你的插件的唯一识别名。
 desc: 查询mc服务器信息和玩家列表,渲染为图片 # 插件简短描述
-version: v1.5.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.5.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: QiChen # 作者
 repo: https://github.com/QiChenSn/astrbot_mcgetter # 插件的仓库地址
