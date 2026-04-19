@@ -1,14 +1,77 @@
 param(
-    [int]$Threads = 0
+    [int]$Threads = 0,
+    [string]$LogFile = ""
 )
 
 $ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modsDir = Join-Path $scriptDir "mods"
 $kubejsDir = Join-Path $scriptDir "kubejs"
 $vineflowerJar = Join-Path $scriptDir "vineflower.jar"
 $outputZip = Join-Path $scriptDir "output.zip"
+
+if ([string]::IsNullOrWhiteSpace($LogFile)) {
+    $LogFile = Join-Path $scriptDir "pack_output_zip.last.log"
+}
+
+if (Test-Path -LiteralPath $LogFile) {
+    Remove-Item -LiteralPath $LogFile -Force -ErrorAction SilentlyContinue
+}
+
+$script:ProgressPercent = 0
+$script:ProgressStatus = "Starting"
+
+function Get-ProgressBarText {
+    param(
+        [int]$Percent,
+        [string]$Status
+    )
+
+    $width = 30
+    $p = [Math]::Min(100, [Math]::Max(0, $Percent))
+    $filled = [Math]::Floor($width * $p / 100)
+    $empty = $width - $filled
+    $bar = ("#" * $filled) + ("-" * $empty)
+    return ("[PROGRESS] [{0}] {1,3}% {2}" -f $bar, $p, $Status)
+}
+
+function Render-LiveView {
+    if ($Host.Name -eq "ConsoleHost") {
+        Clear-Host
+    }
+
+    if (Test-Path -LiteralPath $LogFile) {
+        Get-Content -LiteralPath $LogFile -Tail 50
+    }
+
+    Write-Host ""
+    Write-Host (Get-ProgressBarText -Percent $script:ProgressPercent -Status $script:ProgressStatus)
+}
+
+function Write-Log {
+    param(
+        [ValidateSet("INFO", "WARN", "ERROR", "OK")]
+        [string]$Level,
+        [string]$Message
+    )
+
+    $line = "[{0}] {1}" -f $Level, $Message
+    Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
+    Render-LiveView
+}
+
+function Set-ProgressState {
+    param(
+        [int]$Percent,
+        [string]$Status
+    )
+
+    $script:ProgressPercent = [Math]::Min(100, [Math]::Max(0, $Percent))
+    $script:ProgressStatus = $Status
+    Render-LiveView
+}
 
 if ($Threads -le 0) {
     # Default to half cores to reduce UI lag on user machines.
@@ -19,19 +82,19 @@ if ($Threads -gt 8) {
 }
 
 if (-not (Test-Path -LiteralPath $modsDir -PathType Container)) {
-    Write-Host "[ERROR] Missing mods directory: $modsDir"
+    Write-Log -Level "ERROR" -Message "Missing mods directory: $modsDir"
     exit 1
 }
 if (-not (Test-Path -LiteralPath $kubejsDir -PathType Container)) {
-    Write-Host "[ERROR] Missing kubejs directory: $kubejsDir"
+    Write-Log -Level "ERROR" -Message "Missing kubejs directory: $kubejsDir"
     exit 1
 }
 if (-not (Test-Path -LiteralPath $vineflowerJar -PathType Leaf)) {
-    Write-Host "[ERROR] Missing vineflower.jar: $vineflowerJar"
+    Write-Log -Level "ERROR" -Message "Missing vineflower.jar: $vineflowerJar"
     exit 1
 }
 if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
-    Write-Host "[ERROR] Java not found in PATH"
+    Write-Log -Level "ERROR" -Message "Java not found in PATH"
     exit 1
 }
 
@@ -40,16 +103,18 @@ $workMods = Join-Path $workRoot "mods"
 $workKubejs = Join-Path $workRoot "kubejs"
 
 try {
+    Set-ProgressState -Percent 2 -Status "Preparing workspace"
     New-Item -ItemType Directory -Path $workMods -Force | Out-Null
     New-Item -ItemType Directory -Path $workKubejs -Force | Out-Null
 
-    Write-Host "[INFO] Work dir: $workRoot"
-    Write-Host "[INFO] Copy kubejs (exclude assets)..."
+    Write-Log -Level "INFO" -Message "Prepare temporary workspace"
+    Set-ProgressState -Percent 10 -Status "Copy kubejs"
+    Write-Log -Level "INFO" -Message "Copy kubejs (exclude assets)..."
 
     $null = robocopy $kubejsDir $workKubejs /E /XD (Join-Path $kubejsDir "assets")
     $roboRc = $LASTEXITCODE
     if ($roboRc -ge 8) {
-        Write-Host "[ERROR] Robocopy failed, code=$roboRc"
+        Write-Log -Level "ERROR" -Message "Robocopy failed, code=$roboRc"
         exit 1
     }
 
@@ -61,94 +126,70 @@ try {
         }
 
     $jars = Get-ChildItem -LiteralPath $modsDir -File -Filter "*.jar" -ErrorAction SilentlyContinue
-    Write-Host ("[INFO] Jars found: {0}, parallel threads: {1}" -f $jars.Count, $Threads)
+    $jarCount = $jars.Count
+    Set-ProgressState -Percent 20 -Status "Prepare decompile"
+    Write-Log -Level "INFO" -Message ("Jars found: {0}, threads: {1}" -f $jarCount, $Threads)
 
-    $running = @()
-    $results = @()
-    $pending = [System.Collections.Generic.Queue[object]]::new()
-    foreach ($jar in $jars) {
-        $pending.Enqueue($jar)
+    if ($jarCount -eq 0) {
+        Write-Log -Level "WARN" -Message "No jars found under mods"
     }
+    else {
+        # Use Vineflower's own batch mode with a speed-first option set.
+        $vfArgs = @(
+            "--folder",
+            "--threads=$Threads",
+            "-dgs=0", # decompile-generics off
+            "-din=0", # decompile-inner off
+            "-rsy=0", # keep synthetic markers (less post-processing)
+            "-rbr=0", # keep bridge markers (less post-processing)
+            "--silent" # keep this last among options; it ends option parsing in Vineflower CLI
+        )
+        foreach ($jar in $jars) {
+            $vfArgs += $jar.FullName
+        }
+        $vfArgs += $workMods
 
-    while ($pending.Count -gt 0 -or $running.Count -gt 0) {
-        while ($pending.Count -gt 0 -and $running.Count -lt $Threads) {
-            $jar = $pending.Dequeue()
-            Write-Host ("[INFO] Decompile start: {0}" -f $jar.Name)
-
-            $job = Start-Job -ScriptBlock {
-                param(
-                    [string]$JarPath,
-                    [string]$JarName,
-                    [string]$OutRoot,
-                    [string]$Vineflower
-                )
-
-                $ErrorActionPreference = "Stop"
-                $baseName = [System.IO.Path]::GetFileNameWithoutExtension($JarName)
-                $outDir = Join-Path $OutRoot $baseName
-                New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-
-                & java -jar $Vineflower $JarPath $outDir *> $null
-                $rc = $LASTEXITCODE
-                if ($rc -ne 0) {
-                    Remove-Item -LiteralPath $outDir -Recurse -Force -ErrorAction SilentlyContinue
-                    return [PSCustomObject]@{ Name = $JarName; Success = $false }
-                }
-
-                Get-ChildItem -LiteralPath $outDir -Directory -Recurse -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -ieq "assets" } |
-                    ForEach-Object {
-                        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-
-                return [PSCustomObject]@{ Name = $JarName; Success = $true }
-            } -ArgumentList $jar.FullName, $jar.Name, $workMods, $vineflowerJar
-
-            $running += $job
+        Set-ProgressState -Percent 30 -Status "Running Vineflower"
+        Write-Log -Level "INFO" -Message "Running Vineflower batch decompile..."
+        & java -jar $vineflowerJar @vfArgs
+        $vfRc = $LASTEXITCODE
+        if ($vfRc -ne 0) {
+            throw "Vineflower batch decompile failed with exit code $vfRc"
         }
 
-        if ($running.Count -gt 0) {
-            $done = Wait-Job -Job $running -Any
-            if ($null -ne $done) {
-                $result = Receive-Job -Job $done
-                Remove-Job -Job $done -Force
-                $running = @($running | Where-Object { $_.Id -ne $done.Id })
+        Set-ProgressState -Percent 80 -Status "Post-processing outputs"
 
-                if ($null -ne $result) {
-                    $results += $result
-                    if ($result.Success) {
-                        Write-Host ("[OK] Decompile done: {0}" -f $result.Name)
-                    }
-                    else {
-                        Write-Host ("[WARN] Decompile failed: {0}" -f $result.Name)
-                    }
-                }
+        # Safety pass: remove any directory named assets under decompiled mods output.
+        Get-ChildItem -LiteralPath $workMods -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq "assets" } |
+            ForEach-Object {
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
             }
-        }
     }
-
-    $jarCount = $results.Count
-    $failCount = ($results | Where-Object { -not $_.Success }).Count
-    Write-Host ("[INFO] Decompile summary: total={0}, failed={1}" -f $jarCount, $failCount)
 
     if (Test-Path -LiteralPath $outputZip) {
         Remove-Item -LiteralPath $outputZip -Force
     }
 
-    Write-Host "[INFO] Building output.zip..."
-    Compress-Archive -Path @($workMods, $workKubejs) -DestinationPath $outputZip -Force
+    Set-ProgressState -Percent 88 -Status "Building zip"
+    Write-Log -Level "INFO" -Message "Building output.zip (fast mode)..."
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $workRoot,
+        $outputZip,
+        [System.IO.Compression.CompressionLevel]::Fastest,
+        $false
+    )
 
-    Write-Host "[OK] Build complete: $outputZip"
-    Write-Host "[OK] output.zip contains: mods + kubejs (assets removed)"
-
-    if ($failCount -gt 0) {
-        Write-Host "[WARN] Some jars failed to decompile. Upload package is still generated."
-    }
+    Set-ProgressState -Percent 100 -Status "Done"
+    Write-Log -Level "OK" -Message "Build complete: $outputZip"
+    Write-Log -Level "OK" -Message "output.zip contains: mods + kubejs (assets removed)"
+    Write-Log -Level "INFO" -Message ("Vineflower batch finished, jars processed: {0}" -f $jarCount)
 
     exit 0
 }
 catch {
-    Write-Host ("[ERROR] {0}" -f $_.Exception.Message)
+    Set-ProgressState -Percent $script:ProgressPercent -Status "Failed"
+    Write-Log -Level "ERROR" -Message $_.Exception.Message
     exit 1
 }
 finally {

@@ -62,8 +62,15 @@ MinecraftRoot/
 
 然后将 `output.zip` 上传给插件的 `/mcbind` 流程即可。
 
+执行日志会写入同级目录的 `pack_output_zip.last.log`。若执行失败，窗口会暂停，便于直接查看错误信息。
+默认控制台只显示摘要日志（不刷详细明细），详细过程可在 `pack_output_zip.last.log` 中查看。
+控制台会实时刷新并仅展示“最新 50 条日志”，同时显示进度条。
+
 ### 并发反编译（加速）
 
+- 当前实现：使用 Vineflower 官方 CLI 的批处理方式（单次命令传入多个 source），并通过 `--threads` 使用 Vineflower 内部线程。
+- 速度优先参数：启用 `--silent` 并关闭部分偏可读性的处理（如 generics/inner 还原等），以提高吞吐。
+- 压缩阶段：使用 .NET `ZipFile` + `CompressionLevel.Fastest`，优先提升 `output.zip` 写出速度。
 - 默认并发数：自动使用 CPU 核心数的一半（向下取整，最低 1，上限 8），避免默认占满导致卡顿。
 - 手动指定并发：
 
