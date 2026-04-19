@@ -14,6 +14,7 @@ from .script.json_operate import (
 import asyncio
 import re
 from datetime import datetime
+from time import localtime, strftime
 
 # 常量定义
 HELP_INFO = """
@@ -23,9 +24,12 @@ HELP_INFO = """
 /mc   
 --查询保存的服务器
 
-/mcadd 服务器名称 服务器地址 [force]
+/mcadd 服务器名称 服务器地址 [force] [群聊个数] [群号列表]
 --添加要查询的服务器
 --force: 可选参数，设为True时跳过预查询检查强制添加
+--群聊个数: 可选参数，指定从群号列表中取前几个群
+--群号列表: 可选参数，群号之间使用英文逗号分隔，如 123,456,789
+--默认会添加到当前群；若填写群号列表，会在此基础上额外添加到指定群
 
 /mcget 服务器名称/ID
 --获取指定服务器的地址信息
@@ -120,6 +124,7 @@ class MyPlugin(Star):
                     return
             
             message_chain: List[Comp.Image] = []
+            failed_servers: List[Dict[str, Any]] = []
             servers = json_data.get("servers", {})
             
             for server_id, server_info in servers.items():
@@ -127,20 +132,90 @@ class MyPlugin(Star):
                     mcinfo_img = await self.get_img(server_info['name'], server_info['host'], server_id, str(json_path))
                     if mcinfo_img:
                         message_chain.append(Comp.Image.fromBase64(mcinfo_img))
+                    else:
+                        failed_servers.append({
+                            "id": server_id,
+                            "name": server_info.get("name", "未知服务器"),
+                            "host": server_info.get("host", "未知地址"),
+                            "last_success_time": server_info.get("last_success_time")
+                        })
 
                 except Exception as e:
+                    failed_servers.append({
+                        "id": server_id,
+                        "name": server_info.get("name", "未知服务器"),
+                        "host": server_info.get("host", "未知地址"),
+                        "last_success_time": server_info.get("last_success_time")
+                    })
                     continue
 
             if message_chain:
                 yield event.chain_result(message_chain)
-            else:
+
+            if failed_servers:
+                failed_server_forward_chain = self.build_failed_servers_forward_chain(failed_servers)
+                yield event.chain_result(failed_server_forward_chain)
+
+            if not message_chain and not failed_servers:
                 yield event.plain_result("没有可用的服务器信息，请检查服务器是否在线")
                 
         except Exception as e:
             yield event.plain_result("查询服务器信息时发生错误:"+str(e))
 
+    def build_failed_servers_forward_chain(self, failed_servers: List[Dict[str, Any]]) -> List[Comp.Nodes]:
+        """
+        构建查询失败服务器的合并转发消息链
+
+        Args:
+            failed_servers: 查询失败的服务器信息列表
+
+        Returns:
+            List[Comp.Nodes]: 单条合并转发消息链
+        """
+        nodes: List[Comp.Node] = [
+            Comp.Node(
+                uin="0",
+                name="MCGetter",
+                content=[
+                    Comp.Plain(f"本次查询共有 {len(failed_servers)} 个服务器失败，详情如下：")
+                ]
+            )
+        ]
+
+        for server in failed_servers:
+            last_success_time = server.get("last_success_time")
+            if isinstance(last_success_time, (int, float)) and last_success_time > 0:
+                last_success_text = strftime('%Y-%m-%d %H:%M:%S', localtime(last_success_time))
+            else:
+                last_success_text = "从未查询成功"
+
+            nodes.append(
+                Comp.Node(
+                    uin="0",
+                    name="MCGetter",
+                    content=[
+                        Comp.Plain(
+                            f"ID: {server.get('id', '未知')}\n"
+                            f"名称: {server.get('name', '未知服务器')}\n"
+                            f"地址: {server.get('host', '未知地址')}\n"
+                            f"最后查询成功时间: {last_success_text}"
+                        )
+                    ]
+                )
+            )
+
+        return [Comp.Nodes(nodes=nodes)]
+
     @filter.command("mcadd")
-    async def mcadd(self, event: AstrMessageEvent, name: str, host: str, force: bool = False) -> MessageEventResult:
+    async def mcadd(
+        self,
+        event: AstrMessageEvent,
+        name: str,
+        host: str,
+        force: str = "false",
+        group_count: int = 0,
+        group_ids: str = ""
+    ) -> MessageEventResult:
         """
         添加新的服务器
 
@@ -148,48 +223,129 @@ class MyPlugin(Star):
             event: 消息事件
             name: 服务器名称
             host: 服务器地址
-            force: 是否强制添加（跳过预查询检查）
+            force: 可选，True/False，是否跳过预查询
+            group_count: 可选，指定从群号列表中取前几个群
+            group_ids: 可选，群号列表，逗号分隔
 
         Returns:
             操作结果消息
         """
 
         try:
+            # 解析 force，兼容 true/false/1/0/yes/no
+            force_str = str(force).strip().lower()
+            true_tokens = {"true", "1", "yes", "y", "on"}
+            false_tokens = {"false", "0", "no", "n", "off", ""}
+
+            force_enabled = False
+            legacy_group_id = ""
+            if force_str in true_tokens:
+                force_enabled = True
+            elif force_str in false_tokens:
+                force_enabled = False
+            elif re.fullmatch(r"\d+", force_str):
+                # 兼容旧输入：/mcadd name host <群号>
+                legacy_group_id = force_str
+            else:
+                yield event.plain_result("force 参数无效，请使用 True/False")
+                return
+
+            if group_count < 0:
+                yield event.plain_result("群聊个数不能小于0")
+                return
+
+            parsed_group_ids: List[str] = []
+            if group_ids:
+                normalized_group_ids = str(group_ids).replace("，", ",")
+                parsed_group_ids = [gid.strip() for gid in normalized_group_ids.split(",") if gid.strip()]
+                invalid_group_ids = [gid for gid in parsed_group_ids if not re.fullmatch(r"\d+", gid)]
+                if invalid_group_ids:
+                    yield event.plain_result(f"以下群号不合法: {'、'.join(invalid_group_ids)}")
+                    return
+
+            target_group_ids: List[str] = []
+
+            if legacy_group_id and not parsed_group_ids and group_count == 0:
+                target_group_ids.append(legacy_group_id)
+
+            if parsed_group_ids:
+                if group_count > 0:
+                    if len(parsed_group_ids) < group_count:
+                        yield event.plain_result("群号列表数量少于指定的群聊个数")
+                        return
+                    target_group_ids.extend(parsed_group_ids[:group_count])
+                else:
+                    target_group_ids.extend(parsed_group_ids)
+
             # 检查host合法性
             if not re.match(r'^[a-zA-Z0-9.:-]+$', host):
                 yield event.plain_result("服务器地址格式不正确，只能包含字母、数字和符号.:-")
                 return
-            elif await get_server_status(host) is None and not force:
+            elif await get_server_status(host) is None and not force_enabled:
                 yield event.plain_result("预查询失败，请检查服务器是否在线或地址是否正确，或在完整的/mcadd命令后加上True 强制添加")
                 return
-                
-            group_id = event.get_group_id()
-            json_path = await self.get_json_path(group_id)
-            
-            # 检查当前地址是否已存在
-            try:
-                json_data = await read_json(json_path)
-                servers = json_data.get("servers", {})
-                if servers:
-                    for server_id, server_info in servers.items():
-                        if server_info['host'] == host:
-                            yield event.plain_result(f"已存在相同地址的服务器 {server_info['name']} (ID: {server_id})")
-                            return
-            except Exception as e:
-                yield event.plain_result("检查服务器地址时发生错误:"+str(e))
+
+            # 始终默认包含当前群
+            current_group_id = event.get_group_id()
+            if current_group_id:
+                target_group_ids.insert(0, current_group_id)
+
+            if not target_group_ids:
+                yield event.plain_result("当前会话没有群号，请填写群号列表参数")
                 return
-                
-            if await add_data(json_path, name, host):
-                # 获取新添加的服务器ID
-                json_data = await read_json(json_path)
-                servers = json_data.get("servers", {})
-                for server_id, server_info in servers.items():
-                    if server_info['name'] == name and server_info['host'] == host:
-                        yield event.plain_result(f"成功添加服务器 {name} (ID: {server_id})")
-                        return
-                yield event.plain_result(f"成功添加服务器 {name}")
+
+            # 去重并保留顺序
+            target_group_ids = list(dict.fromkeys(target_group_ids))
+
+            result_lines: List[str] = []
+
+            for group_id in target_group_ids:
+                json_path = await self.get_json_path(group_id)
+
+                # 检查当前群是否已存在相同地址
+                try:
+                    json_data = await read_json(json_path)
+                    servers = json_data.get("servers", {})
+                    duplicated_server = None
+                    for server_id, server_info in servers.items():
+                        if server_info.get('host') == host:
+                            duplicated_server = (server_id, server_info)
+                            break
+
+                    if duplicated_server:
+                        dup_id, dup_info = duplicated_server
+                        result_lines.append(
+                            f"群 {group_id}: 已存在相同地址服务器 {dup_info.get('name', '未知')} (ID: {dup_id})"
+                        )
+                        continue
+                except Exception as e:
+                    result_lines.append(f"群 {group_id}: 检查地址失败 - {str(e)}")
+                    continue
+
+                # 执行添加并获取新增ID
+                if await add_data(json_path, name, host):
+                    try:
+                        json_data = await read_json(json_path)
+                        servers = json_data.get("servers", {})
+                        created_id = None
+                        for server_id, server_info in servers.items():
+                            if server_info.get('name') == name and server_info.get('host') == host:
+                                created_id = server_id
+                                break
+
+                        if created_id:
+                            result_lines.append(f"群 {group_id}: 添加成功 {name} (ID: {created_id})")
+                        else:
+                            result_lines.append(f"群 {group_id}: 添加成功 {name}")
+                    except Exception as e:
+                        result_lines.append(f"群 {group_id}: 添加成功，但读取新ID失败 - {str(e)}")
+                else:
+                    result_lines.append(f"群 {group_id}: 无法添加 {name}，请检查是否已存在")
+
+            if result_lines:
+                yield event.plain_result("\n".join(result_lines))
             else:
-                yield event.plain_result(f"无法添加 {name}，请检查是否已存在")
+                yield event.plain_result("未执行任何添加操作")
                 
         except Exception as e:
             yield event.plain_result("添加服务器时发生错误:"+str(e))
@@ -292,12 +448,33 @@ class MyPlugin(Star):
             if not servers:
                 yield event.plain_result("没有保存的服务器")
                 return
-                
-            server_list = "当前保存的服务器列表:\n"
+
+            nodes: List[Comp.Node] = [
+                Comp.Node(
+                    uin="0",
+                    name="MCGetter",
+                    content=[
+                        Comp.Plain(f"当前保存的服务器共 {len(servers)} 个，列表如下：")
+                    ]
+                )
+            ]
+
             for server_id, server_info in servers.items():
-                server_list += f"ID: {server_id}, 名称: {server_info['name']}, 地址: {server_info['host']}\n"
-                
-            yield event.plain_result(server_list.strip())
+                nodes.append(
+                    Comp.Node(
+                        uin="0",
+                        name="MCGetter",
+                        content=[
+                            Comp.Plain(
+                                f"ID: {server_id}\n"
+                                f"名称: {server_info.get('name', '未知服务器')}\n"
+                                f"地址: {server_info.get('host', '未知地址')}"
+                            )
+                        ]
+                    )
+                )
+
+            yield event.chain_result([Comp.Nodes(nodes=nodes)])
             
         except Exception as e:
             yield event.plain_result("获取服务器列表时发生错误:"+str(e))
