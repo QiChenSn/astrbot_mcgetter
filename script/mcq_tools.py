@@ -10,6 +10,7 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 
+MAX_READ_CHARS = 12000
 MAX_LIST_ITEMS = 500
 MAX_SEARCH_RESULTS = 80
 
@@ -85,12 +86,12 @@ class ListServerDataFilesTool(FunctionTool[AstrAgentContext]):
 
 @dataclass
 class ReadServerDataFileTool(FunctionTool[AstrAgentContext]):
-    """将相对路径解析为绑定目录下可参考的绝对路径。"""
+    """读取绑定目录下指定文本文件内容。"""
 
     name: str = "read_server_data_file"
     description: str = (
-        "Resolve a relative file path under mods/kubejs into an absolute path. "
-        "Only returns path reference, does not read file content."
+        "Read a text file under mods/kubejs in the bound server data directory. "
+        "Only relative paths are allowed."
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -99,6 +100,10 @@ class ReadServerDataFileTool(FunctionTool[AstrAgentContext]):
                 "relative_path": {
                     "type": "string",
                     "description": "Required. Relative path under bind dir, such as kubejs/server_scripts/example.js",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Optional. Max characters to return, default 12000.",
                 },
             },
             "required": ["relative_path"],
@@ -127,26 +132,36 @@ class ReadServerDataFileTool(FunctionTool[AstrAgentContext]):
         if not parts or parts[0] not in {"mods", "kubejs"}:
             return "只允许读取 mods 或 kubejs 下的文件。"
 
-        return (
-            f"可参考文件路径:\n"
-            f"relative: {target.relative_to(base).as_posix()}\n"
-            f"absolute: {str(target)}"
-        )
+        max_chars = int(kwargs.get("max_chars", MAX_READ_CHARS) or MAX_READ_CHARS)
+        if max_chars <= 0:
+            max_chars = MAX_READ_CHARS
+        if max_chars > 30000:
+            max_chars = 30000
+
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return f"读取文件失败: {e}"
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...<内容已截断>"
+
+        return f"文件: {target.relative_to(base).as_posix()}\n{text}"
 
 
 @dataclass
 class SearchServerDataTool(FunctionTool[AstrAgentContext]):
-    """按文件名/路径关键词检索参考文件路径（不读取内容）。"""
+    """在绑定目录文本文件中按关键词检索。"""
 
     name: str = "search_server_data"
-    description: str = "Search candidate file paths by filename/path keyword under mods/kubejs."
+    description: str = "Search keyword occurrences in text files under mods/kubejs."
     parameters: dict = Field(
         default_factory=lambda: {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Required. Keyword to match file path, e.g. script, recipe, event, quest.",
+                    "description": "Required. Keyword or text pattern to search.",
                 },
                 "subdir": {
                     "type": "string",
@@ -185,8 +200,11 @@ class SearchServerDataTool(FunctionTool[AstrAgentContext]):
             for root, _, filenames in os.walk(target):
                 for filename in filenames:
                     fp = Path(root) / filename
-                    rel = fp.relative_to(base).as_posix()
-                    if q_lower in rel.lower():
+                    try:
+                        text = fp.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    if q_lower in text.lower():
                         rel = fp.relative_to(base).as_posix()
                         results.append(rel)
                         if len(results) >= MAX_SEARCH_RESULTS:
