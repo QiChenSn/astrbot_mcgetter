@@ -1,10 +1,13 @@
 from pathlib import Path
 from typing import Callable, Awaitable
 import re
+import time
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 from astrbot.core.agent.tool import ToolSet
+from astrbot.core.agent.hooks import BaseAgentRunHooks
+from astrbot.api import logger
 
 from .json_operate import get_all_servers
 from .mcq_tools import (
@@ -21,7 +24,8 @@ DEFAULT_USER_QUESTION = "分析kubejs主要进行了哪些修改"
 DEFAULT_SYSTEM_PROMPT = (
     "你是 Minecraft 模组与整合包分析助手。"
     "你必须先通过路径工具获取需要参照的文件路径。"
-    "拿到路径后，优先使用默认 Agent 执行器已有工具进行后续读取/检索/分析。"
+    "拿到路径后，优先使用 AstrBot 内置工具进行读取/检索/分析；"
+    "只有当内置读取能力不可用时，才使用插件提供的读取/检索兜底工具。"
     "如本地信息不足，可调用默认网络搜索工具补充版本兼容性、模组信息与已知问题。"
     "回答请结构化输出：简短说明，证据，解释说明。"
     "不要编造未在工具结果中出现的文件内容。"
@@ -61,6 +65,8 @@ class McqService:
         provider_id = await context.get_current_chat_provider_id(event.unified_msg_origin)
 
         tools = self._build_tools(bind_dir, context)
+        trace_hooks = _McqToolTraceHooks()
+        start_ts = time.perf_counter()
 
         prompt = (
             f"群号: {group_id}\n"
@@ -78,8 +84,17 @@ class McqService:
             system_prompt=DEFAULT_SYSTEM_PROMPT,
             max_steps=25,
             tool_call_timeout=120,
+            agent_hooks=trace_hooks,
         )
-        return llm_resp.completion_text or "分析完成，但未返回有效内容。"
+        elapsed = time.perf_counter() - start_ts
+        answer = llm_resp.completion_text or "分析完成，但未返回有效内容。"
+        used_tools = ", ".join(trace_hooks.tool_names) if trace_hooks.tool_names else "无"
+        return (
+            f"{answer}\n\n"
+            f"---\n"
+            f"耗时: {elapsed:.2f}s\n"
+            f"工具调用: {used_tools}"
+        )
 
     def _parse_args(self, message_str: str) -> tuple[str, str]:
         text = str(message_str or "").strip()
@@ -101,11 +116,45 @@ class McqService:
         return server_id, question
 
     def _build_tools(self, bind_dir: Path, context: Context) -> ToolSet:
-        # 以默认工具集为基础，保留系统已有执行能力，再补充路径提示工具。
-        toolset = context.get_llm_tool_manager().get_full_tool_set()
+        # get_full_tool_set 仅包含插件/MCP工具，不含 AstrBot 内置工具。
+        # 这里显式合并 builtin，确保拿到系统自带能力（如搜索/文件等）。
+        tmgr = context.get_llm_tool_manager()
+        toolset = ToolSet()
 
+        full_toolset = tmgr.get_full_tool_set()
+        for tool in full_toolset:
+            if getattr(tool, "active", True):
+                toolset.add_tool(tool)
+
+        for builtin_tool in tmgr.iter_builtin_tools():
+            if getattr(builtin_tool, "active", True):
+                toolset.add_tool(builtin_tool)
+
+        logger.debug(
+            "mcq 可用工具统计: full=%s, builtin=%s, merged=%s",
+            len(full_toolset.tools),
+            len(tmgr.iter_builtin_tools()),
+            len(toolset.tools),
+        )
+
+        # 永远提供路径索引工具，帮助 Agent 锁定分析范围。
         toolset.add_tool(ListServerDataFilesTool(bind_dir=str(bind_dir)))
-        toolset.add_tool(ReadServerDataFileTool(bind_dir=str(bind_dir)))
-        toolset.add_tool(SearchServerDataTool(bind_dir=str(bind_dir)))
+
+        # 优先依赖 AstrBot 内置读取工具；若内置读取能力缺失，再启用插件读取兜底。
+        has_builtin_file_read = toolset.get_tool("astrbot_file_read_tool") is not None
+        if not has_builtin_file_read:
+            toolset.add_tool(ReadServerDataFileTool(bind_dir=str(bind_dir)))
+            toolset.add_tool(SearchServerDataTool(bind_dir=str(bind_dir)))
+            logger.warning("mcq 未检测到 astrbot_file_read_tool，已启用插件读取兜底工具")
 
         return toolset
+
+
+class _McqToolTraceHooks(BaseAgentRunHooks):
+    def __init__(self) -> None:
+        self.tool_names: list[str] = []
+
+    async def on_tool_start(self, run_context, tool, tool_args) -> None:
+        name = getattr(tool, "name", "")
+        if name and name not in self.tool_names:
+            self.tool_names.append(name)
