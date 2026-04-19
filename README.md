@@ -29,6 +29,50 @@ AstrBot Minecraft服务器信息查询插件，用于查询Minecraft服务器状
 3. 重启 AstrBot 或重新加载插件
 4. 在群聊中使用 `/mchelp` 查看帮助
 
+## 上传端一键打包（Windows）
+
+为了给 `/mcbind` 提供更干净的上传包，仓库提供了 `pack_output_zip.bat` + `pack_output_zip.ps1`（仅用户侧打包，不影响插件逻辑）。
+
+### 使用前准备
+
+1. 安装并配置好 Java（确保 `java` 命令可用）。
+2. 下载 Vineflower 反编译器，并将其重命名为 `vineflower.jar`。
+3. 将 `pack_output_zip.bat`、`pack_output_zip.ps1` 与 `vineflower.jar` 放到游戏目录中，且与 `mods`、`kubejs` 同级。
+
+目录示例：
+
+```
+MinecraftRoot/
+    mods/
+    kubejs/
+    vineflower.jar
+    pack_output_zip.bat
+    pack_output_zip.ps1
+```
+
+### 执行方式
+
+双击运行 `pack_output_zip.bat`（或在 CMD 中执行）。脚本会：
+
+1. 在独立临时目录中工作，不污染原始 `mods`、`kubejs`。
+2. 复制 `kubejs`，并排除 `assets` 目录。
+3. 批量反编译 `mods` 下全部 `.jar` 到临时目录。
+4. 删除反编译结果中的 `assets`。
+5. 打包生成同级目录下的 `output.zip`（包含 `mods`、`kubejs` 两个子目录）。
+
+然后将 `output.zip` 上传给插件的 `/mcbind` 流程即可。
+
+### 并发反编译（加速）
+
+- 默认并发数：自动使用 CPU 核心数的一半（向下取整，最低 1，上限 8），避免默认占满导致卡顿。
+- 手动指定并发：
+
+```cmd
+pack_output_zip.bat 6
+```
+
+说明：`6` 表示最多同时反编译 6 个 jar。
+
 ## 使用方法
 
 ### 基础命令
