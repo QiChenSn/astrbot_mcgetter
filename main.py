@@ -50,7 +50,7 @@ HELP_INFO = """
 --切换图片渲染模板
 """
 
-@register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.5.1")
+@register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.5.2")
 class MyPlugin(Star):
     """Minecraft服务器信息查询插件"""
     
