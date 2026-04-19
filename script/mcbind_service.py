@@ -5,6 +5,8 @@ import time
 import shutil
 import zipfile
 import re
+import tempfile
+import uuid
 from urllib.parse import urlparse
 
 from astrbot.api.event import AstrMessageEvent
@@ -18,6 +20,8 @@ from .json_operate import get_all_servers
 DATA_DIR = Path(StarTools.get_data_dir("astrbot_mcgetter"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 REQUEST_TIMEOUT_SECONDS = 120
+UPLOAD_TEMP_DIR = Path(tempfile.gettempdir()) / "abm"
+UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class McBindService:
@@ -101,9 +105,11 @@ class McBindService:
             return f"服务器ID {server_id} 已不存在，请重新选择后执行 /mcbind"
 
         bind_dir = DATA_DIR / f"{group_id}_{server_id}"
-        temp_dir = DATA_DIR / "_uploads"
+        temp_dir = UPLOAD_TEMP_DIR
         temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_zip_path = temp_dir / f"{group_id}_{server_id}_{int(time.time())}.zip"
+        temp_zip_path = temp_dir / f"u_{uuid.uuid4().hex[:8]}.zip"
+        staging_root = Path(tempfile.mkdtemp(prefix="s_", dir=str(temp_dir)))
+        staging_bind_dir = staging_root
 
         try:
             file_name = str(getattr(file_component, "name", "") or "")
@@ -141,15 +147,13 @@ class McBindService:
                     del self.bind_requests[request_key]
                     return "zip 内必须至少包含 mods 或 kubejs 文件夹之一"
 
-                if (bind_dir / "mods").exists():
-                    shutil.rmtree(bind_dir / "mods", ignore_errors=True)
-                if (bind_dir / "kubejs").exists():
-                    shutil.rmtree(bind_dir / "kubejs", ignore_errors=True)
-
-                extracted_any = self._extract_allowed_paths(zf, infos, bind_dir)
+                staging_bind_dir.mkdir(parents=True, exist_ok=True)
+                extracted_any = self._extract_allowed_paths(zf, infos, staging_bind_dir)
                 if not extracted_any:
                     del self.bind_requests[request_key]
                     return "zip 中未找到可解压的 mods/kubejs 内容"
+
+            self._deploy_extracted_content(staging_bind_dir, bind_dir)
 
             del self.bind_requests[request_key]
             return f"绑定成功：已写入 {bind_dir}"
@@ -165,6 +169,11 @@ class McBindService:
             if temp_zip_path.exists():
                 try:
                     temp_zip_path.unlink()
+                except Exception:
+                    pass
+            if staging_root.exists():
+                try:
+                    shutil.rmtree(staging_root, ignore_errors=True)
                 except Exception:
                     pass
 
@@ -214,16 +223,72 @@ class McBindService:
                 continue
 
             if info.is_dir():
-                resolved_destination.mkdir(parents=True, exist_ok=True)
+                os.makedirs(self._to_fs_path(resolved_destination), exist_ok=True)
                 extracted_any = True
                 continue
 
-            resolved_destination.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info, "r") as src, open(resolved_destination, "wb") as dst:
+            os.makedirs(self._to_fs_path(resolved_destination.parent), exist_ok=True)
+            with zf.open(info, "r") as src, open(self._to_fs_path(resolved_destination), "wb") as dst:
                 shutil.copyfileobj(src, dst)
             extracted_any = True
 
         return extracted_any
+
+    def _to_fs_path(self, path: Path) -> str:
+        """在 Windows 下返回支持长路径的文件系统路径。"""
+        p = os.path.abspath(str(path))
+        if os.name != "nt":
+            return p
+        if p.startswith("\\\\?\\"):
+            return p
+        if p.startswith("\\\\"):
+            return "\\\\?\\UNC\\" + p[2:]
+        return "\\\\?\\" + p
+
+    def _deploy_extracted_content(self, extracted_bind_dir: Path, target_bind_dir: Path) -> None:
+        """将 staging 解压结果替换到正式目录，失败时回滚旧目录。"""
+        target_bind_dir.mkdir(parents=True, exist_ok=True)
+
+        backup_dirs: list[tuple[Path, Path]] = []
+        deployed_targets: list[Path] = []
+        timestamp = int(time.time())
+
+        try:
+            for name in ("mods", "kubejs"):
+                src_dir = extracted_bind_dir / name
+                if not src_dir.exists():
+                    continue
+
+                target_dir = target_bind_dir / name
+                backup_dir = target_bind_dir / f"{name}.bak_{timestamp}"
+
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+
+                if target_dir.exists():
+                    target_dir.rename(backup_dir)
+                    backup_dirs.append((target_dir, backup_dir))
+
+                shutil.move(str(src_dir), str(target_dir))
+                deployed_targets.append(target_dir)
+
+            if not deployed_targets:
+                raise ValueError("staging 目录中未找到 mods/kubejs 可部署内容")
+
+            for _, backup_dir in backup_dirs:
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+
+        except Exception:
+            for deployed in deployed_targets:
+                if deployed.exists():
+                    shutil.rmtree(deployed, ignore_errors=True)
+
+            for original_target, backup_dir in backup_dirs:
+                if backup_dir.exists() and not original_target.exists():
+                    backup_dir.rename(original_target)
+
+            raise
 
     def _is_file_component(self, message: Any) -> bool:
         if isinstance(message, Comp.File):
