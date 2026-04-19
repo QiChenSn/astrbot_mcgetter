@@ -1,0 +1,32 @@
+{
+  "mcq_permission_enabled": {
+    "type": "bool",
+    "description": "是否启用 /mcq 权限控制",
+    "default": true
+  },
+  "mcq_allow_astrbot_admin": {
+    "type": "bool",
+    "description": "是否允许 AstrBot 系统管理员使用 /mcq 与 /mcop",
+    "default": true
+  },
+  "mcq_allow_group_owner": {
+    "type": "bool",
+    "description": "是否允许群主使用 /mcq",
+    "default": true
+  },
+  "mcq_allow_group_admin": {
+    "type": "bool",
+    "description": "是否允许群管理员使用 /mcq",
+    "default": true
+  },
+  "mcq_min_group_level": {
+    "type": "int",
+    "description": "允许使用 /mcq 的最低群等级阈值（<=0 表示关闭等级判断）",
+    "default": 90
+  },
+  "mcq_whitelist_user_ids": {
+    "type": "list",
+    "description": "/mcq 白名单用户 ID 列表",
+    "default": []
+  }
+}

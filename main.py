@@ -57,6 +57,10 @@ HELP_INFO = """
 --使用 Agent 分析该服务器已绑定的 mods/kubejs 内容
 --支持调用网络搜索工具补充信息
 
+/mcop @用户 或 /mcop 用户ID
+--将用户加入 /mcq 权限白名单
+--仅系统管理员、群主、群管理员或群等级达到阈值的用户可操作
+
 /mctem
 --切换图片渲染模板
 """
@@ -65,7 +69,7 @@ HELP_INFO = """
 class MyPlugin(Star):
     """Minecraft服务器信息查询插件"""
     
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: Optional[Dict[str, Any]] = None):
         """
         初始化插件
 
@@ -73,6 +77,7 @@ class MyPlugin(Star):
             context: 插件上下文
         """
         super().__init__(context)
+        self.plugin_config = config or {}
         self.mcbind_service = McBindService()
         self.mcq_service = McqService()
 
@@ -429,10 +434,43 @@ class MyPlugin(Star):
     async def mcq(self, event: AstrMessageEvent) -> MessageEventResult:
         """对指定服务器已绑定内容进行 Agent 分析。"""
         try:
+            if not self._can_use_mcq(event):
+                yield event.plain_result(
+                    "你没有权限使用 /mcq。默认仅系统管理员、群主/群管理员、群等级达到阈值用户可用；"
+                    "管理员可用 /mcop @用户 或 /mcop 用户ID 添加白名单。"
+                )
+                return
+
             result = await self.mcq_service.ask(event, self.context, self.get_json_path)
             yield event.plain_result(result)
         except Exception as e:
             yield event.plain_result("执行 mcq 分析时发生错误:" + str(e))
+
+    @filter.command("mcop")
+    async def mcop(self, event: AstrMessageEvent, user_id: str = "") -> MessageEventResult:
+        """添加 /mcq 白名单用户。"""
+        try:
+            if not self._can_manage_mcq_whitelist(event):
+                yield event.plain_result("你没有权限执行 /mcop")
+                return
+
+            target_user_id = self._extract_target_user_id(event, user_id)
+            if not target_user_id:
+                yield event.plain_result("用法：/mcop @用户 或 /mcop 用户ID")
+                return
+
+            whitelist = self._get_mcq_whitelist()
+            if target_user_id in whitelist:
+                yield event.plain_result(f"用户 {target_user_id} 已在 /mcq 白名单中")
+                return
+
+            whitelist.append(target_user_id)
+            self._set_plugin_config_value("mcq_whitelist_user_ids", whitelist)
+            self._save_plugin_config()
+
+            yield event.plain_result(f"已将用户 {target_user_id} 加入 /mcq 白名单")
+        except Exception as e:
+            yield event.plain_result("执行 mcop 时发生错误:" + str(e))
 
     @filter.command("mcup")
     async def mcup(self, event: AstrMessageEvent, identifier: str, new_name: Optional[str] = None, new_host: Optional[str] = None) -> MessageEventResult:
@@ -601,3 +639,145 @@ class MyPlugin(Star):
         json_path = data_path / f'{group_id}.json'
         json_path.parent.mkdir(parents=True, exist_ok=True)
         return json_path
+
+    def _get_plugin_config_value(self, key: str, default: Any) -> Any:
+        try:
+            if hasattr(self.plugin_config, "get"):
+                value = self.plugin_config.get(key, default)
+                return default if value is None else value
+        except Exception:
+            pass
+        return default
+
+    def _set_plugin_config_value(self, key: str, value: Any) -> None:
+        try:
+            if isinstance(self.plugin_config, dict) or hasattr(self.plugin_config, "__setitem__"):
+                self.plugin_config[key] = value
+        except Exception as e:
+            logger.warning("设置插件配置失败 key=%s: %s", key, e)
+
+    def _save_plugin_config(self) -> None:
+        save_fn = getattr(self.plugin_config, "save_config", None)
+        if callable(save_fn):
+            save_fn()
+
+    def _get_mcq_whitelist(self) -> List[str]:
+        raw = self._get_plugin_config_value("mcq_whitelist_user_ids", [])
+        if not isinstance(raw, list):
+            return []
+        ret: List[str] = []
+        for item in raw:
+            s = str(item).strip()
+            if s:
+                ret.append(s)
+        return list(dict.fromkeys(ret))
+
+    def _extract_target_user_id(self, event: AstrMessageEvent, user_id_text: str) -> str:
+        for comp in event.get_messages():
+            if isinstance(comp, Comp.At):
+                qq = str(getattr(comp, "qq", "") or "").strip()
+                if qq and qq != "all":
+                    return qq
+
+        text = str(user_id_text or "").strip()
+        if re.fullmatch(r"\d+", text):
+            return text
+        return ""
+
+    def _extract_sender_level(self, event: AstrMessageEvent) -> int:
+        sender = getattr(event.message_obj, "sender", None)
+        level_candidates = []
+        if sender is not None:
+            level_candidates.append(getattr(sender, "level", None))
+            level_candidates.append(getattr(sender, "group_level", None))
+
+        raw_message = getattr(event.message_obj, "raw_message", None)
+        if isinstance(raw_message, dict):
+            sender_obj = raw_message.get("sender")
+            if isinstance(sender_obj, dict):
+                level_candidates.append(sender_obj.get("level"))
+
+        for raw_level in level_candidates:
+            if raw_level is None:
+                continue
+            if isinstance(raw_level, (int, float)):
+                return int(raw_level)
+            s = str(raw_level)
+            m = re.search(r"\d+", s)
+            if m:
+                try:
+                    return int(m.group(0))
+                except Exception:
+                    continue
+        return 0
+
+    def _check_group_owner_or_admin(self, event: AstrMessageEvent) -> Dict[str, bool]:
+        sender_id = event.get_sender_id()
+        group = getattr(event.message_obj, "group", None)
+        is_owner = False
+        is_group_admin = False
+
+        if group is not None:
+            owner_id = str(getattr(group, "group_owner", "") or "").strip()
+            if owner_id and sender_id and owner_id == sender_id:
+                is_owner = True
+
+            admins = getattr(group, "group_admins", None) or []
+            admin_set = {str(a).strip() for a in admins if str(a).strip()}
+            if sender_id and sender_id in admin_set:
+                is_group_admin = True
+
+        sender = getattr(event.message_obj, "sender", None)
+        sender_role = str(getattr(sender, "role", "") or "").lower()
+        event_role = str(getattr(event, "role", "") or "").lower()
+
+        if sender_role in {"owner", "group_owner"}:
+            is_owner = True
+        if sender_role in {"admin", "administrator", "group_admin"}:
+            is_group_admin = True
+        if event_role in {"owner", "group_owner"}:
+            is_owner = True
+        if event_role in {"admin", "administrator", "group_admin"}:
+            is_group_admin = True
+
+        return {"owner": is_owner, "admin": is_group_admin}
+
+    def _can_manage_mcq_whitelist(self, event: AstrMessageEvent) -> bool:
+        allow_astrbot_admin = bool(self._get_plugin_config_value("mcq_allow_astrbot_admin", True))
+
+        if allow_astrbot_admin and event.is_admin():
+            return True
+
+        role_check = self._check_group_owner_or_admin(event)
+        if role_check["owner"] or role_check["admin"]:
+            return True
+
+        return False
+
+    def _can_use_mcq(self, event: AstrMessageEvent) -> bool:
+        permission_enabled = bool(self._get_plugin_config_value("mcq_permission_enabled", True))
+        if not permission_enabled:
+            return True
+
+        sender_id = event.get_sender_id()
+        if sender_id and sender_id in self._get_mcq_whitelist():
+            return True
+
+        allow_astrbot_admin = bool(self._get_plugin_config_value("mcq_allow_astrbot_admin", True))
+        allow_group_owner = bool(self._get_plugin_config_value("mcq_allow_group_owner", True))
+        allow_group_admin = bool(self._get_plugin_config_value("mcq_allow_group_admin", True))
+        min_group_level = int(self._get_plugin_config_value("mcq_min_group_level", 90) or 0)
+
+        if allow_astrbot_admin and event.is_admin():
+            return True
+
+        role_check = self._check_group_owner_or_admin(event)
+        if allow_group_owner and role_check["owner"]:
+            return True
+        if allow_group_admin and role_check["admin"]:
+            return True
+
+        if min_group_level > 0 and self._extract_sender_level(event) >= min_group_level:
+            return True
+
+        return False
