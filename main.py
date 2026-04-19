@@ -7,6 +7,7 @@ from astrbot.api import logger
 from .script.get_server_info import get_server_status
 from .script.template_selector import write_config, get_img
 from .script.mcbind_service import McBindService
+from .script.mcq_service import McqService
 from .script.json_operate import (
     read_json, add_data, del_data, update_data, 
     get_all_servers, get_server_info, get_server_by_name,
@@ -52,6 +53,10 @@ HELP_INFO = """
 --发送命令后请在120秒内上传 .zip 文件
 --压缩包内至少包含 mods 或 kubejs 文件夹之一
 
+/mcq 服务器ID [提示词]
+--使用 Agent 分析该服务器已绑定的 mods/kubejs 内容
+--支持调用网络搜索工具补充信息
+
 /mctem
 --切换图片渲染模板
 """
@@ -69,6 +74,7 @@ class MyPlugin(Star):
         """
         super().__init__(context)
         self.mcbind_service = McBindService()
+        self.mcq_service = McqService()
 
     @filter.command("mchelp")
     async def get_help(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -418,6 +424,15 @@ class MyPlugin(Star):
             
         except Exception as e:
             yield event.plain_result("获取服务器信息时发生错误:"+str(e))
+
+    @filter.command("mcq")
+    async def mcq(self, event: AstrMessageEvent) -> MessageEventResult:
+        """对指定服务器已绑定内容进行 Agent 分析。"""
+        try:
+            result = await self.mcq_service.ask(event, self.context, self.get_json_path)
+            yield event.plain_result(result)
+        except Exception as e:
+            yield event.plain_result("执行 mcq 分析时发生错误:" + str(e))
 
     @filter.command("mcup")
     async def mcup(self, event: AstrMessageEvent, identifier: str, new_name: Optional[str] = None, new_host: Optional[str] = None) -> MessageEventResult:
