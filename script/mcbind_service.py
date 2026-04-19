@@ -19,7 +19,7 @@ from .json_operate import get_all_servers
 
 DATA_DIR = Path(StarTools.get_data_dir("astrbot_mcgetter"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-REQUEST_TIMEOUT_SECONDS = 120
+REQUEST_TIMEOUT_SECONDS = 300
 UPLOAD_TEMP_DIR = Path(tempfile.gettempdir()) / "abm"
 UPLOAD_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -57,7 +57,7 @@ class McBindService:
         }
 
         return (
-            f"已开始绑定服务器 {server_id}。请在{REQUEST_TIMEOUT_SECONDS}秒内上传 .zip 文件"
+            f"已开始绑定服务器 {server_id}。请在5分钟内上传 .zip 文件"
             "（必须包含 mods 或 kubejs 文件夹）。"
         )
 
