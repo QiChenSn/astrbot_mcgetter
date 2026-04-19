@@ -6,6 +6,7 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from .script.get_server_info import get_server_status
 from .script.template_selector import write_config, get_img
+from .script.mcbind_service import McBindService
 from .script.json_operate import (
     read_json, add_data, del_data, update_data, 
     get_all_servers, get_server_info, get_server_by_name,
@@ -46,11 +47,16 @@ HELP_INFO = """
 /mccleanup
 --手动触发自动清理（删除10天未查询成功的服务器）
 
+/mcbind 服务器ID
+--为指定服务器绑定数据压缩包（zip）
+--发送命令后请在120秒内上传 .zip 文件
+--压缩包内至少包含 mods 或 kubejs 文件夹之一
+
 /mctem
 --切换图片渲染模板
 """
 
-@register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.5.2")
+@register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.5.3")
 class MyPlugin(Star):
     """Minecraft服务器信息查询插件"""
     
@@ -62,6 +68,7 @@ class MyPlugin(Star):
             context: 插件上下文
         """
         super().__init__(context)
+        self.mcbind_service = McBindService()
 
     @filter.command("mchelp")
     async def get_help(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -373,6 +380,24 @@ class MyPlugin(Star):
                 
         except Exception as e:
             yield event.plain_result("删除服务器时发生错误:"+str(e))
+
+    @filter.command("mcbind")
+    async def mcbind(self, event: AstrMessageEvent, server_id: str) -> MessageEventResult:
+        """
+        为指定服务器绑定数据文件（上传zip后解压mods/kubejs）
+        """
+        message = await self.mcbind_service.begin_bind(event, server_id, self.get_json_path)
+        if message:
+            yield event.plain_result(message)
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def handle_mcbind_file(self, event: AstrMessageEvent) -> MessageEventResult:
+        """
+        处理 /mcbind 后的文件上传消息
+        """
+        message = await self.mcbind_service.handle_file_message(event, self.get_json_path)
+        if message:
+            yield event.plain_result(message)
 
     @filter.command("mcget")
     async def mcget(self, event: AstrMessageEvent, identifier: str) -> MessageEventResult:
