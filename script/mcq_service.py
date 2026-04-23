@@ -116,26 +116,26 @@ class McqService:
         return server_id, question
 
     def _build_tools(self, bind_dir: Path, context: Context) -> ToolSet:
-        # 兼容不同 AstrBot 版本的 ToolManager API。
-        # 某些版本没有 iter_builtin_tools，不能直接硬调用。
+        # get_full_tool_set 仅包含插件/MCP工具，不含 AstrBot 内置工具。
+        # 这里显式合并 builtin，确保拿到系统自带能力（如搜索/文件等）。
         tmgr = context.get_llm_tool_manager()
         toolset = ToolSet()
 
-        full_toolset = self._safe_get_full_tool_set(tmgr)
+        full_toolset = tmgr.get_full_tool_set()
         for tool in full_toolset:
             if getattr(tool, "active", True):
                 toolset.add_tool(tool)
 
-        builtin_tools = self._safe_get_builtin_tools(tmgr)
+        builtin_tools = tmgr.iter_builtin_tools()
         for builtin_tool in builtin_tools:
             if getattr(builtin_tool, "active", True):
                 toolset.add_tool(builtin_tool)
 
         logger.debug(
             "mcq 可用工具统计: full=%s, builtin=%s, merged=%s",
-            self._toolset_len(full_toolset),
-            len(builtin_tools),
-            self._toolset_len(toolset),
+            len(full_toolset.tools),
+            len(tmgr.iter_builtin_tools()),
+            len(toolset.tools),
         )
 
         # 永远提供路径索引工具，帮助 Agent 锁定分析范围。
@@ -149,57 +149,6 @@ class McqService:
             logger.warning("mcq 未检测到 astrbot_file_read_tool，已启用插件读取兜底工具")
 
         return toolset
-
-    def _safe_get_full_tool_set(self, tmgr) -> ToolSet:
-        get_full = getattr(tmgr, "get_full_tool_set", None)
-        if callable(get_full):
-            try:
-                toolset = get_full()
-                if isinstance(toolset, ToolSet):
-                    return toolset
-            except Exception as e:
-                logger.warning("mcq 获取 full tool set 失败，回退为空集合: %s", e)
-        return ToolSet()
-
-    def _safe_get_builtin_tools(self, tmgr) -> list:
-        # 新版本：直接批量获取
-        iter_builtin = getattr(tmgr, "iter_builtin_tools", None)
-        if callable(iter_builtin):
-            try:
-                tools = iter_builtin()
-                return list(tools) if tools else []
-            except Exception as e:
-                logger.warning("mcq 获取 builtin tools(iter) 失败: %s", e)
-
-        # 旧版本：尝试按名称逐个获取常用内置工具
-        get_builtin = getattr(tmgr, "get_builtin_tool", None)
-        if callable(get_builtin):
-            builtin_names = [
-                "astrbot_file_read_tool",
-                "astrbot_grep_tool",
-                "astrbot_python_tool",
-                "astrbot_web_search_tool",
-            ]
-            ret = []
-            for name in builtin_names:
-                try:
-                    tool = get_builtin(name)
-                    if tool is not None:
-                        ret.append(tool)
-                except Exception:
-                    continue
-            return ret
-
-        return []
-
-    def _toolset_len(self, toolset: ToolSet) -> int:
-        tools = getattr(toolset, "tools", None)
-        if isinstance(tools, list):
-            return len(tools)
-        func_list = getattr(toolset, "func_list", None)
-        if isinstance(func_list, list):
-            return len(func_list)
-        return 0
 
 
 class _McqToolTraceHooks(BaseAgentRunHooks):
