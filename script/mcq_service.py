@@ -122,19 +122,20 @@ class McqService:
         toolset = ToolSet()
 
         full_toolset = tmgr.get_full_tool_set()
-        for tool in full_toolset:
+        full_tools = list(getattr(full_toolset, "tools", []) or [])
+        for tool in full_tools:
             if getattr(tool, "active", True):
                 toolset.add_tool(tool)
 
-        builtin_tools = tmgr.iter_builtin_tools()
+        builtin_tools = list(tmgr.iter_builtin_tools() or [])
         for builtin_tool in builtin_tools:
             if getattr(builtin_tool, "active", True):
                 toolset.add_tool(builtin_tool)
 
         logger.debug(
             "mcq 可用工具统计: full=%s, builtin=%s, merged=%s",
-            len(full_toolset.tools),
-            len(tmgr.iter_builtin_tools()),
+            len(full_tools),
+            len(builtin_tools),
             len(toolset.tools),
         )
 

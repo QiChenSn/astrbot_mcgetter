@@ -1,0 +1,8 @@
+# Generated search/debug outputs
+search_results.txt
+search_results*.txt
+*search_result*.txt
+
+# Local temporary outputs
+*.tmp
+*.temp

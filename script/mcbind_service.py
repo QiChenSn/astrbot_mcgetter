@@ -30,6 +30,17 @@ class McBindService:
     def __init__(self) -> None:
         self.bind_requests: Dict[str, Dict[str, Any]] = {}
 
+    def _cleanup_expired_requests(self) -> int:
+        now = time.time()
+        expired_keys = [
+            key
+            for key, req in self.bind_requests.items()
+            if now - float(req.get("timestamp", 0)) > REQUEST_TIMEOUT_SECONDS
+        ]
+        for key in expired_keys:
+            del self.bind_requests[key]
+        return len(expired_keys)
+
     async def begin_bind(
         self,
         event: AstrMessageEvent,
@@ -66,6 +77,8 @@ class McBindService:
         event: AstrMessageEvent,
         get_json_path: Callable[[str], Awaitable[Path]],
     ) -> Optional[str]:
+        self._cleanup_expired_requests()
+
         group_id = event.get_group_id()
         if not group_id:
             return None
